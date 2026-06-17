@@ -1,4 +1,4 @@
-from PIL import Image, ImageOps
+from PIL import Image
 import config
 import numpy as np
 
@@ -11,6 +11,7 @@ def resize_image(image):
     returns:
         :PIL IMAGE
     """
+
     temp_image = image.copy()
     target_size = config.CLASSIFIER_PIC_SIZE_MAX
     width, height = temp_image.size
@@ -23,7 +24,7 @@ def resize_image(image):
     new_height = int(height * scale)
     temp_image = temp_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
-    result = Image.new('RGB', (target_size, target_size), (0, 0, 0))
+    result = Image.new("RGB", (target_size, target_size), (0, 0, 0))
     x = (target_size - new_width) // 2
     y = (target_size - new_height) // 2
     result.paste(temp_image, (x, y))
@@ -40,7 +41,7 @@ def crop_bounding_box(image, bbox):
     returns:
         temp_image: PIL IMAGE
     """
-    # int() для безопасности, так как YOLO отдает float
+
     x1, y1, x2, y2 = [int(coord) for coord in bbox]
 
     x1 = max(0, min(x1, image.width - 1))
@@ -74,10 +75,3 @@ def top_n_closest_embs(emb, emb_matrix, top_n=5):
     top_n_similarities = cosine_similarity[top_n_positions]
 
     return top_n_positions, top_n_similarities
-
-
-if __name__ == '__main__':
-    pass
-    # img = Image.open('./img/1.webp')
-    # print(check_image(img))
-    # img.show()

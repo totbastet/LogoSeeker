@@ -3,25 +3,36 @@ from typing import Dict, Any
 
 import cv2
 import numpy as np
-from PIL import Image, ImageOps
+from PIL import Image
 from ultralytics import YOLO
 
 from classifier import LogoClassifier
 from utils import crop_bounding_box, resize_image, top_n_closest_embs
 import config
 import json
+import torch
 
 logger = logging.getLogger(__name__)
 
+
 class LogoPipeline:
     def __init__(self):
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info(f"Считаем на: {self.device}")
+
         logger.info("Инициализация детектора YOLO (путь: %s)...", config.DETECTOR_PATH)
+
         self.detector = YOLO(config.DETECTOR_PATH)
         self.conf_threshold = config.DETECTOR_THRESHOLD
 
+        if self.device == "cuda":
+            self.detector.to("cuda")
+            logger.info("Детектор YOLO загружен на GPU")
+        else:
+            logger.info("Детектор YOLO загружен на CPU")
+
         logger.info("Инициализация классификатора (Embeddings)...")
         self.classifier = LogoClassifier()
-        # self.reference_db = {}
         self.restricted_db = np.load(config.RESTRICTED_EMB_BASE_PATH)
         self.competitors_db = np.load(config.COMPETITORS_EMB_BASE_PATH)
         self.employers_db = np.load(config.EMPLOYERS_EMB_BASE_PATH)
@@ -32,7 +43,6 @@ class LogoPipeline:
             self.competitors_db_map = json.load(f)
         with open(config.EMPLOYERS_EMB_MAP_PATH, "r") as f:
             self.employers_db_map = json.load(f)
-
 
     def _search_with_mapping(self, emb, database, database_map, top_n=1):
         """
@@ -53,18 +63,17 @@ class LogoPipeline:
 
         results = []
         for pos, sim in zip(positions, similarities):
-            name = database_map.get(str(pos), database_map.get(pos, f"unknown_{pos}"))
+            name = database_map.get(str(pos), f"unknown_{pos}")
 
-            results.append({
-                'name': name,
-                'similarity': float(sim)
-            })
+            results.append({"name": name, "similarity": float(sim)})
 
         return results
 
-    def _process_match(self, embedding, database, db_map, threshold, category, coords_yolo, det_conf):
+    def _process_match(
+        self, embedding, database, db_map, threshold, category, coords_yolo, det_conf
+    ):
         """
-            Функция ищет ближайший эмбеддинг в указанной базе и сравнивает его схожесть
+        Функция ищет ближайший эмбеддинг в указанной базе и сравнивает его схожесть
         с заданным порогом. При превышении порога формирует словарь с результатами.
 
         Args:
@@ -90,26 +99,46 @@ class LogoPipeline:
         возвращает None.
         """
         best_match = self._search_with_mapping(embedding, database, db_map, top_n=1)
-        if best_match and best_match[0]['similarity'] > threshold:
-            if category == 'restricted':
-                verdict = 'blocked'
-            elif category == 'competitor':
-                verdict = 'manual_moderation'
-            else:  # category == 'employer'
-                verdict = 'ok'
-                
+        if best_match and best_match[0]["similarity"] > threshold:
+            if category == "restricted":
+                verdict = "blocked"
+            elif category == "competitor":
+                verdict = "manual_moderation"
+            else:
+                verdict = "ok"
+
             return {
                 "box": [round(c, 4) for c in coords_yolo],
                 "detector_confidence": round(det_conf, 4),
-                "best_match": best_match[0]['name'],
-                "similarity_score": round(best_match[0]['similarity'], 4),
+                "best_match": best_match[0]["name"],
+                "similarity_score": round(best_match[0]["similarity"], 4),
                 "verdict": verdict,
-                "logo_category": category
+                "logo_category": category,
             }
         return None
 
-
     def process_image(self, image_bytes: bytes) -> Dict[str, Any]:
+        """
+        Основной метод обработки изображения. Выполняет полный цикл модерации:
+        декодирование -> ресайз -> детекция (YOLO) -> извлечение признаков (DINO) ->
+        мэтчинг по базам.
+
+        Логика поиска каскадная: сначала проверяется база 'restricted', затем
+        'competitor', затем 'employer'. При первом же превышении порога совпадения
+        поиск для конкретного логотипа останавливается.
+
+        Args:
+            image_bytes (bytes): Сырые байты изображения, полученные из HTTP-запроса.
+
+        Returns:
+            Dict[str, Any]: JSON с результатами модерации.
+                            Формат:
+                            {
+                                "status": "success" | "error",
+                                "found_logos": int (количество найденных лого),
+                                "details": list[dict] (список вердиктов по каждому логотипу)
+                            }
+        """
         nparr = np.frombuffer(image_bytes, np.uint8)
         img_cv = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
@@ -122,18 +151,20 @@ class LogoPipeline:
         if max(w, h) > DETECTION_SIZE:
             scale = min(DETECTION_SIZE / w, DETECTION_SIZE / h)
             new_w, new_h = int(w * scale), int(h * scale)
-            img_resized = cv2.resize(img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            img_resized = cv2.resize(
+                img_cv, (new_w, new_h), interpolation=cv2.INTER_AREA
+            )
         else:
             img_resized = img_cv
-
-
 
         img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB)
         img_pil = Image.fromarray(img_rgb)
 
         results_data = []
 
-        det_results = self.detector(img_pil, conf=config.DETECTOR_THRESHOLD, verbose=False)
+        det_results = self.detector(
+            img_pil, conf=config.DETECTOR_THRESHOLD, verbose=False
+        )
         for r in det_results:
             for box in r.boxes:
                 det_conf = float(box.conf[0])
@@ -149,28 +180,50 @@ class LogoPipeline:
                     embedding = self.classifier.get_embedding(processed_crop)
 
                     categories = [
-                        ('restricted', self.restricted_db, self.restricted_db_map,
-                         config.RESTRICTED_SIMILARITY_THRESHOLD),
-                        ('competitor', self.competitors_db, self.competitors_db_map,
-                         config.COMPETITORS_SIMILARITY_THRESHOLD),
-                        ('employer', self.employers_db, self.employers_db_map,
-                         config.EMPLOYERS_SIMILARITY_THRESHOLD),
+                        (
+                            "restricted",
+                            self.restricted_db,
+                            self.restricted_db_map,
+                            config.RESTRICTED_SIMILARITY_THRESHOLD,
+                        ),
+                        (
+                            "competitor",
+                            self.competitors_db,
+                            self.competitors_db_map,
+                            config.COMPETITORS_SIMILARITY_THRESHOLD,
+                        ),
+                        (
+                            "employer",
+                            self.employers_db,
+                            self.employers_db_map,
+                            config.EMPLOYERS_SIMILARITY_THRESHOLD,
+                        ),
                     ]
 
                     for category, db, db_map, threshold in categories:
-                        temp = self._process_match(embedding, db, db_map, threshold, category, coords_yolo, det_conf)
+                        temp = self._process_match(
+                            embedding,
+                            db,
+                            db_map,
+                            threshold,
+                            category,
+                            coords_yolo,
+                            det_conf,
+                        )
                         if temp:
                             results_data.append(temp)
                             break
                     else:
-                        results_data.append({
-                            "box": [round(c, 4) for c in coords_yolo],
-                            "detector_confidence": round(det_conf, 4),
-                            "best_match": "unknown",
-                            "similarity_score": 0.0,
-                            "verdict": "ok",
-                            "logo_category": "unknown"
-                        })
+                        results_data.append(
+                            {
+                                "box": [round(c, 4) for c in coords_yolo],
+                                "detector_confidence": round(det_conf, 4),
+                                "best_match": "unknown",
+                                "similarity_score": 0.0,
+                                "verdict": "ok",
+                                "logo_category": "unknown",
+                            }
+                        )
 
                 except Exception as e:
                     logger.warning("Ошибка при обработке кропа: %s", e)
@@ -179,5 +232,5 @@ class LogoPipeline:
         return {
             "status": "success",
             "found_logos": sum(len(r.boxes) for r in det_results),
-            "details": results_data
+            "details": results_data,
         }
