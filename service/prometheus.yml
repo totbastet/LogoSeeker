@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+  external_labels:
+    monitor: 'logo-metrics-monitor'
+
+rule_files:
+  - "/etc/prometheus/alert.rules"
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'flask-backend'
+    static_configs:
+      - targets: ['logo_service:8000']
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['logo_seeker_cadvisor:8080']

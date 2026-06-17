@@ -1,0 +1,18 @@
+groups:
+  - name: logo_service_alerts
+    rules:
+      - alert: HighErrorRate
+        expr: sum(rate(flask_http_request_duration_seconds_count{status=~"5.."}[1m])) / sum(rate(flask_http_request_duration_seconds_count[1m])) * 100 > 2
+        for: 5s
+        labels:
+          severity: critical
+        annotations:
+          summary: "Доля ошибок превысила 2% за последнюю минуту!"
+
+      - alert: HighLatency90Percentile
+        expr: histogram_quantile(0.90, sum(rate(flask_http_request_duration_seconds_bucket[1m])) by (le)) * 1000 > 80
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "90% запросов обрабатываются медленнее 80 мс!"

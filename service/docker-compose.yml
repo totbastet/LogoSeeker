@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # БЭКЕНД (FastAPI)
+
   logo_service:
     build:
       context: .
@@ -21,18 +21,19 @@ services:
       - ./classifier/config.py:/app/classifier/config.py:ro
     environment:
       DATABASE_URL: "mysql+pymysql://user:password@db:3306/avito_moderation"
+      TORCH_FORCE_WEIGHTS_ONLY_LOAD: 0
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-#    deploy:
-#      resources:
-#        reservations:
-#          devices:
-#            - driver: nvidia
-#              count: 1
-#              capabilities: [gpu]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   # БАЗА ДАННЫХ
   db:
@@ -56,7 +57,6 @@ services:
       timeout: 5s
       retries: 5
 
-  # ФРОНТЕНД (React + Nginx)
   frontend:
     build:
       context: ./logo-frontend
@@ -69,6 +69,72 @@ services:
       - logo_network
     depends_on:
       - logo_service
+  locust:
+    image: locustio/locust:2.15.1
+    container_name: locust
+    ports:
+      - "8089:8089"
+    volumes:
+      - ./:/mnt/locust
+      - ./test_images:/mnt/locust/test_images:ro
+    command: -f /mnt/locust/locustfile.py --host http://logo_service:8000
+    networks:
+      - logo_network
+    restart: unless-stopped
+    depends_on:
+      - logo_service
+
+  prometheus:
+    image: prom/prometheus:v2.40.7
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./alert.rules:/etc/prometheus/alert.rules # Проброс правил для алертов
+    networks:
+      - logo_network
+    restart: unless-stopped
+    depends_on:
+      - logo_service
+
+  grafana:
+    image: grafana/grafana:9.4.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin 
+    volumes:
+      - ./grafana/config.ini:/etc/grafana/grafana.ini
+      - ./grafana/datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml
+      - ./grafana/dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    networks:
+      - logo_network
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.47.2
+    container_name: logo_seeker_cadvisor
+    privileged: true
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+    environment:
+      - LD_LIBRARY_PATH=/usr/lib/nvidia
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+      - /usr/lib/nvidia:/usr/lib/nvidia:ro
+    networks:
+      - logo_network
+    restart: unless-stopped
 
 networks:
   logo_network:

@@ -22,4 +22,7 @@ RUN if [ "$USE_GPU" = "true" ] ; then \
 
 COPY . .
 
+RUN sed -i 's/weights_only=True/weights_only=False/g' /usr/local/lib/python3.11/site-packages/ultralytics/nn/tasks.py
+RUN sed -i 's/weights_only: bool = True/weights_only: bool = False/g' /usr/local/lib/python3.11/site-packages/torch/serialization.py
+
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
